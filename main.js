@@ -2,6 +2,13 @@ var import_obsidian = require("obsidian");
 
 const DEFAULT_SETTINGS = {
     enableProxy: false,
+    // 'fixed' = manually built proxyRules string (original behavior).
+    // 'system' = delegate entirely to the OS's own proxy config (WinINet on
+    // Windows, including any PAC/WPAD script already set up there) via
+    // session.setProxy({ mode: 'system' }). Use this when the OS is already
+    // correctly configured and authenticating fine for real browsers --
+    // no point re-deriving a static address from the PAC by hand.
+    proxyMode: "fixed",
     httpProxy: "",
     httpsProxy: "",
     socksProxy: "",
@@ -107,17 +114,13 @@ var GlobalProxyPlugin = class extends import_obsidian.Plugin {
       }
     }
 
-    let proxyRules = this.composeProxyRules();
-    let proxyBypassRules = proxyRules ? this.settings.bypassRules : undefined;
+    const proxyConfig = this.composeProxyConfig();
 
     // Set the proxy for all known sessions. Auth is handled globally by
     // setupGlobalProxyAuth() above, not per-session here.
     for (let session of sessions) {
       try {
-        await session.setProxy({
-          proxyRules: proxyRules || "",
-          proxyBypassRules: proxyBypassRules || ""
-        });
+        await session.setProxy(proxyConfig || { proxyRules: "" });
       } catch (e) {
         console.error('Failed to set proxy for session', e);
       }
@@ -145,10 +148,8 @@ var GlobalProxyPlugin = class extends import_obsidian.Plugin {
           if (!newSession || sessions.includes(newSession)) {
             return;
           }
-          newSession.setProxy({
-            proxyRules: proxyRules || "",
-            proxyBypassRules: proxyBypassRules || ""
-          }).catch((e) => console.error('Failed to set proxy for new webview session', e));
+          newSession.setProxy(proxyConfig || { proxyRules: "" })
+            .catch((e) => console.error('Failed to set proxy for new webview session', e));
         } catch (e) {
           console.error('web-contents-created handler failed', e);
         }
@@ -156,8 +157,12 @@ var GlobalProxyPlugin = class extends import_obsidian.Plugin {
       electronApp.on('web-contents-created', this.webContentsCreatedHandler);
     }
 
-    if (proxyRules) {
-      new import_obsidian.Notice('Proxy enabled successfully!');
+    if (proxyConfig) {
+      new import_obsidian.Notice(
+        this.settings.proxyMode === 'system'
+          ? 'System proxy mode enabled!'
+          : 'Proxy enabled successfully!'
+      );
     }
   }
   
@@ -300,6 +305,25 @@ var GlobalProxyPlugin = class extends import_obsidian.Plugin {
     new import_obsidian.Notice('Proxy disabled!');
   }
   
+  // Returns the object to pass to session.setProxy(), or undefined if
+  // nothing usable is configured. Centralizes the fixed-vs-system branch so
+  // enableProxy()'s two setProxy() call sites (the initial sessions loop and
+  // the webview hook) can't drift out of sync with each other.
+  composeProxyConfig() {
+    if (this.settings.proxyMode === 'system') {
+      return { mode: 'system' };
+    }
+
+    const proxyRules = this.composeProxyRules();
+    if (!proxyRules) {
+      return undefined;
+    }
+    return {
+      proxyRules,
+      proxyBypassRules: this.settings.bypassRules || ""
+    };
+  }
+
   composeProxyRules() {
     // Validate all configured proxies
     const validProxies = ["socksProxy", "httpProxy", "httpsProxy"]
@@ -365,7 +389,29 @@ var GlobalProxySettingTab = class extends import_obsidian.PluginSettingTab {
             await this.plugin.disableProxy();
           }
         }));
-    
+
+    new import_obsidian.Setting(containerEl)
+      .setName("Proxy Mode")
+      .setDesc(
+        "System: delegate entirely to the OS's own proxy configuration " +
+        "(WinINet on Windows), including any PAC/WPAD script already set " +
+        "up there. Use this if the OS is already correctly authenticating " +
+        "for regular browsers on this network. Fixed: manually specify a " +
+        "static proxy address below (Chromium's own proxy-auth handling, " +
+        "which may not match your proxy's requirements)."
+      )
+      .addDropdown((dropdown) => dropdown
+        .addOption("fixed", "Fixed (manual address below)")
+        .addOption("system", "System (use OS/PAC configuration)")
+        .setValue(this.plugin.settings.proxyMode)
+        .onChange(async (value) => {
+          this.plugin.settings.proxyMode = value;
+          await this.plugin.saveSettings();
+          if (this.plugin.settings.enableProxy) {
+            await this.plugin.enableProxy();
+          }
+        }));
+
     new import_obsidian.Setting(containerEl)
       .setName("SOCKS Proxy")
       .setDesc("SOCKS proxy configuration (e.g., socks5://user:pass@host:port)")
@@ -378,7 +424,12 @@ var GlobalProxySettingTab = class extends import_obsidian.PluginSettingTab {
 
     new import_obsidian.Setting(containerEl)
       .setName("HTTP Proxy")
-      .setDesc("HTTP proxy configuration (e.g., http://user:pass@host:port)")
+      .setDesc(
+        "HTTP proxy configuration (e.g., http://user:pass@host:port). " +
+        "In System proxy mode this field's credentials are still used " +
+        "as a fallback if a proxy login challenge reaches this plugin -- " +
+        "only its address is unused for routing in that mode."
+      )
       .addText((text) => text
         .setPlaceholder("http://[user:pass@]host:port")
         .setValue(this.plugin.settings.httpProxy)
@@ -388,7 +439,10 @@ var GlobalProxySettingTab = class extends import_obsidian.PluginSettingTab {
 
     new import_obsidian.Setting(containerEl)
       .setName("HTTPS Proxy")
-      .setDesc("HTTPS proxy configuration (e.g., http://user:pass@host:port)")
+      .setDesc(
+        "HTTPS proxy configuration (e.g., http://user:pass@host:port). " +
+        "Same System-mode note as HTTP Proxy above."
+      )
       .addText((text) => text
         .setPlaceholder("http://[user:pass@]host:port")
         .setValue(this.plugin.settings.httpsProxy)
