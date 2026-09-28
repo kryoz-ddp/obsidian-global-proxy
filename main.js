@@ -11,9 +11,9 @@ const DEFAULT_SETTINGS = {
 
 var GlobalProxyPlugin = class extends import_obsidian.Plugin {
   async onload() {
+    this.loginHandlers = new Map(); // Tracks active login handlers
     await this.loadSettings();
     this.addSettingTab(new GlobalProxySettingTab(this.app, this));
-    this.loginHandlers = new Map(); // Tracks active login handlers
   }
   
   async onunload() {
@@ -124,15 +124,30 @@ var GlobalProxyPlugin = class extends import_obsidian.Plugin {
         electronApp.removeListener('web-contents-created', this.webContentsCreatedHandler);
       }
       this.webContentsCreatedHandler = (event, contents) => {
-        const newSession = contents.session;
-        if (!newSession || sessions.includes(newSession)) {
-          return;
+        try {
+          // Only handle actual embedded browser views (<webview> tags), not
+          // Obsidian's/Electron's own short-lived internal webContents --
+          // those can be destroyed before the async setProxy() call below
+          // resolves, which throws deep inside @electron/remote's IPC layer,
+          // outside this function's own try/catch.
+          if (contents.getType() !== 'webview') {
+            return;
+          }
+          const newSession = contents.session;
+          if (!newSession || sessions.includes(newSession)) {
+            return;
+          }
+          newSession.setProxy({
+            proxyRules: proxyRules || "",
+            proxyBypassRules: proxyBypassRules || ""
+          }).then(() => {
+            if (!contents.isDestroyed()) {
+              this.setupProxyAuth(newSession);
+            }
+          }).catch((e) => console.error('Failed to set proxy for new webview session', e));
+        } catch (e) {
+          console.error('web-contents-created handler failed', e);
         }
-        newSession.setProxy({
-          proxyRules: proxyRules || "",
-          proxyBypassRules: proxyBypassRules || ""
-        }).then(() => this.setupProxyAuth(newSession))
-          .catch((e) => console.error('Failed to set proxy for new webContents session', e));
       };
       electronApp.on('web-contents-created', this.webContentsCreatedHandler);
     }
