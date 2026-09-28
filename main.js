@@ -11,7 +11,6 @@ const DEFAULT_SETTINGS = {
 
 var GlobalProxyPlugin = class extends import_obsidian.Plugin {
   async onload() {
-    this.loginHandlers = new Map(); // Tracks active login handlers
     await this.loadSettings();
     this.addSettingTab(new GlobalProxySettingTab(this.app, this));
   }
@@ -69,13 +68,24 @@ var GlobalProxyPlugin = class extends import_obsidian.Plugin {
     if (!this.settings.enableProxy) {
       return;
     }
-    
+
     const sessionModule = this.getElectronSession();
     if (!sessionModule) {
       new import_obsidian.Notice('Error: Cannot access Electron session API');
       return;
     }
-    
+
+    // Register the app-wide login handler FIRST, synchronously, before any
+    // session's setProxy() below. A <webview>'s src is often already set at
+    // creation time, so its first request can fire before a per-session
+    // 'login' listener attached later (e.g. after an await) exists --
+    // that first request then hard-fails with 407/ERR_TUNNEL_CONNECTION_FAILED
+    // and Electron will not retry just because a listener showed up after.
+    // app.on('login', ...) fires for every session's auth challenges, so one
+    // handler registered up front covers all current and future sessions
+    // with no per-session race at all.
+    this.setupGlobalProxyAuth();
+
     let sessions = [];
     this.sessionMap.default = sessionModule.defaultSession;
     sessions.push(this.sessionMap.default);
@@ -100,16 +110,14 @@ var GlobalProxyPlugin = class extends import_obsidian.Plugin {
     let proxyRules = this.composeProxyRules();
     let proxyBypassRules = proxyRules ? this.settings.bypassRules : undefined;
 
-    // First set the proxy for all sessions
+    // Set the proxy for all known sessions. Auth is handled globally by
+    // setupGlobalProxyAuth() above, not per-session here.
     for (let session of sessions) {
       try {
-        await session.setProxy({ 
-          proxyRules: proxyRules || "", 
-          proxyBypassRules: proxyBypassRules || "" 
+        await session.setProxy({
+          proxyRules: proxyRules || "",
+          proxyBypassRules: proxyBypassRules || ""
         });
-        
-        // Then configure authentication
-        this.setupProxyAuth(session);
       } catch (e) {
         console.error('Failed to set proxy for session', e);
       }
@@ -140,10 +148,6 @@ var GlobalProxyPlugin = class extends import_obsidian.Plugin {
           newSession.setProxy({
             proxyRules: proxyRules || "",
             proxyBypassRules: proxyBypassRules || ""
-          }).then(() => {
-            if (!contents.isDestroyed()) {
-              this.setupProxyAuth(newSession);
-            }
           }).catch((e) => console.error('Failed to set proxy for new webview session', e));
         } catch (e) {
           console.error('web-contents-created handler failed', e);
@@ -157,36 +161,36 @@ var GlobalProxyPlugin = class extends import_obsidian.Plugin {
     }
   }
   
-  setupProxyAuth(session) {
-    // Remove the old handler if one exists
-    const oldHandler = this.loginHandlers.get(session);
-    if (oldHandler) {
-      session.removeListener('login', oldHandler);
-      this.loginHandlers.delete(session);
+  setupGlobalProxyAuth() {
+    const electronApp = this.getElectronApp();
+    if (!electronApp) {
+      console.error('Unable to register global proxy login handler: no Electron app access');
+      return;
     }
-    
-    // Get the authentication credentials
-    const proxyAuth = this.extractAuthFromSettings();
-    
-    if (proxyAuth && proxyAuth.username && proxyAuth.password) {
-      // Create a new handler
-      const loginHandler = (event, webContents, details, authInfo, callback) => {
-        // Check that this is a proxy authentication request
-        if (authInfo.isProxy) {
-          event.preventDefault();
-          // Small delay for stability
-          setTimeout(() => {
-            callback(proxyAuth.username, proxyAuth.password);
-          }, 100);
-        } else {
-          // Not proxy authentication -- pass through
-          callback();
-        }
-      };
-      
-      session.on('login', loginHandler);
-      this.loginHandlers.set(session, loginHandler);
+
+    // Re-registering on every enableProxy() call (e.g. after a settings
+    // change) must not stack listeners, and must pick up fresh credentials.
+    if (this.appLoginHandler) {
+      electronApp.removeListener('login', this.appLoginHandler);
     }
+
+    this.appLoginHandler = (event, webContents, details, authInfo, callback) => {
+      if (!authInfo.isProxy) {
+        // Not proxy authentication -- let another handler (or the default
+        // behavior) deal with it.
+        return;
+      }
+
+      const proxyAuth = this.extractAuthFromSettings();
+      if (!proxyAuth || !proxyAuth.username || !proxyAuth.password) {
+        return;
+      }
+
+      event.preventDefault();
+      callback(proxyAuth.username, proxyAuth.password);
+    };
+
+    electronApp.on('login', this.appLoginHandler);
   }
   
   extractAuthFromSettings() {
@@ -256,9 +260,15 @@ var GlobalProxyPlugin = class extends import_obsidian.Plugin {
 
   async disableProxy() {
     const electronApp = this.getElectronApp();
-    if (electronApp && this.webContentsCreatedHandler) {
-      electronApp.removeListener('web-contents-created', this.webContentsCreatedHandler);
-      this.webContentsCreatedHandler = null;
+    if (electronApp) {
+      if (this.webContentsCreatedHandler) {
+        electronApp.removeListener('web-contents-created', this.webContentsCreatedHandler);
+        this.webContentsCreatedHandler = null;
+      }
+      if (this.appLoginHandler) {
+        electronApp.removeListener('login', this.appLoginHandler);
+        this.appLoginHandler = null;
+      }
     }
 
     let sessions = [];
@@ -267,26 +277,19 @@ var GlobalProxyPlugin = class extends import_obsidian.Plugin {
         sessions.push(this.sessionMap[key]);
       }
     }
-    
+
     for (let session of sessions) {
       try {
-        // Remove the login handler
-        const handler = this.loginHandlers.get(session);
-        if (handler) {
-          session.removeListener('login', handler);
-          this.loginHandlers.delete(session);
-        }
-        
         // Reset the proxy
         await session.setProxy({});
-        
+
         // Close connections to apply the change
         await session.closeAllConnections();
       } catch (e) {
         console.error('Failed to disable proxy for session', e);
       }
     }
-    
+
     new import_obsidian.Notice('Proxy disabled!');
   }
   
