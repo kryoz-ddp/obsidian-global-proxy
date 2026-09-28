@@ -115,6 +115,28 @@ var GlobalProxyPlugin = class extends import_obsidian.Plugin {
       }
     }
 
+    // Catch any session Electron creates from here on (webviews, popouts,
+    // other browser-style plugins) that we didn't already know to proxy by
+    // partition name via pluginTokens.
+    const electronApp = this.getElectronApp();
+    if (electronApp) {
+      if (this.webContentsCreatedHandler) {
+        electronApp.removeListener('web-contents-created', this.webContentsCreatedHandler);
+      }
+      this.webContentsCreatedHandler = (event, contents) => {
+        const newSession = contents.session;
+        if (!newSession || sessions.includes(newSession)) {
+          return;
+        }
+        newSession.setProxy({
+          proxyRules: proxyRules || "",
+          proxyBypassRules: proxyBypassRules || ""
+        }).then(() => this.setupProxyAuth(newSession))
+          .catch((e) => console.error('Failed to set proxy for new webContents session', e));
+      };
+      electronApp.on('web-contents-created', this.webContentsCreatedHandler);
+    }
+
     if (proxyRules) {
       new import_obsidian.Notice('Proxy enabled successfully!');
     }
@@ -189,8 +211,41 @@ var GlobalProxyPlugin = class extends import_obsidian.Plugin {
     }
     return null;
   }
-  
+
+  getElectronApp() {
+    try {
+      const remoteModule = require('@electron/remote');
+      if (remoteModule && remoteModule.app) {
+        return remoteModule.app;
+      }
+    } catch (e) {}
+
+    try {
+      const electron = require('electron');
+      if (electron.remote && electron.remote.app) {
+        return electron.remote.app;
+      }
+    } catch (e) {}
+
+    try {
+      const { app } = require('electron');
+      if (app) {
+        return app;
+      }
+    } catch (e) {
+      console.error('Unable to access Electron app API');
+    }
+
+    return null;
+  }
+
   async disableProxy() {
+    const electronApp = this.getElectronApp();
+    if (electronApp && this.webContentsCreatedHandler) {
+      electronApp.removeListener('web-contents-created', this.webContentsCreatedHandler);
+      this.webContentsCreatedHandler = null;
+    }
+
     let sessions = [];
     for (const key in this.sessionMap) {
       if (this.sessionMap[key]) {
