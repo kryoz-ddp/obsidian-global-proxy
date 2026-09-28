@@ -13,7 +13,7 @@ var GlobalProxyPlugin = class extends import_obsidian.Plugin {
   async onload() {
     await this.loadSettings();
     this.addSettingTab(new GlobalProxySettingTab(this.app, this));
-    this.loginHandlers = new Map(); // Для отслеживания обработчиков
+    this.loginHandlers = new Map(); // Tracks active login handlers
   }
   
   async onunload() {
@@ -31,28 +31,28 @@ var GlobalProxyPlugin = class extends import_obsidian.Plugin {
   }
   
   getElectronSession() {
-    // Пробуем разные способы получения session
+    // Try different ways of obtaining the session module
     try {
-      // Сначала пробуем @electron/remote
+      // First try @electron/remote
       const remoteModule = require('@electron/remote');
       if (remoteModule && remoteModule.session) {
         return remoteModule.session;
       }
     } catch (e) {
-      // Если @electron/remote не доступен
+      // @electron/remote not available
     }
     
     try {
-      // Пробуем старый remote API
+      // Try the legacy remote API
       const electron = require('electron');
       if (electron.remote && electron.remote.session) {
         return electron.remote.session;
       }
     } catch (e) {
-      // Если и старый API не доступен
+      // Legacy API not available either
     }
     
-    // В крайнем случае пробуем прямой доступ
+    // Last resort: direct access
     try {
       const { session } = require('electron');
       if (session) {
@@ -100,7 +100,7 @@ var GlobalProxyPlugin = class extends import_obsidian.Plugin {
     let proxyRules = this.composeProxyRules();
     let proxyBypassRules = proxyRules ? this.settings.bypassRules : undefined;
 
-    // Сначала устанавливаем прокси для всех сессий
+    // First set the proxy for all sessions
     for (let session of sessions) {
       try {
         await session.setProxy({ 
@@ -108,7 +108,7 @@ var GlobalProxyPlugin = class extends import_obsidian.Plugin {
           proxyBypassRules: proxyBypassRules || "" 
         });
         
-        // Затем настраиваем аутентификацию
+        // Then configure authentication
         this.setupProxyAuth(session);
       } catch (e) {
         console.error('Failed to set proxy for session', e);
@@ -143,28 +143,28 @@ var GlobalProxyPlugin = class extends import_obsidian.Plugin {
   }
   
   setupProxyAuth(session) {
-    // Удаляем старый обработчик если есть
+    // Remove the old handler if one exists
     const oldHandler = this.loginHandlers.get(session);
     if (oldHandler) {
       session.removeListener('login', oldHandler);
       this.loginHandlers.delete(session);
     }
     
-    // Получаем данные аутентификации
+    // Get the authentication credentials
     const proxyAuth = this.extractAuthFromSettings();
     
     if (proxyAuth && proxyAuth.username && proxyAuth.password) {
-      // Создаем новый обработчик
+      // Create a new handler
       const loginHandler = (event, webContents, details, authInfo, callback) => {
-        // Проверяем что это запрос аутентификации от прокси
+        // Check that this is a proxy authentication request
         if (authInfo.isProxy) {
           event.preventDefault();
-          // Небольшая задержка для стабильности
+          // Small delay for stability
           setTimeout(() => {
             callback(proxyAuth.username, proxyAuth.password);
           }, 100);
         } else {
-          // Если это не прокси-аутентификация, пропускаем
+          // Not proxy authentication -- pass through
           callback();
         }
       };
@@ -183,8 +183,8 @@ var GlobalProxyPlugin = class extends import_obsidian.Plugin {
     
     for (const proxy of proxies) {
       if (proxy.value && proxy.value.trim()) {
-        // Улучшенное регулярное выражение для разных форматов
-        // Поддерживает: scheme://user:pass@host:port
+        // Improved regex for different formats
+        // Supports: scheme://user:pass@host:port
         const authMatch = proxy.value.match(/^(\w+):\/\/([^:@]+):([^@]+)@([^:]+):(\d+)$/);
         if (authMatch) {
           return {
@@ -196,7 +196,7 @@ var GlobalProxyPlugin = class extends import_obsidian.Plugin {
           };
         }
         
-        // Альтернативный формат без схемы: user:pass@host:port
+        // Alternative format without a scheme: user:pass@host:port
         const simpleAuthMatch = proxy.value.match(/^([^:@]+):([^@]+)@([^:]+):(\d+)$/);
         if (simpleAuthMatch) {
           return {
@@ -255,17 +255,17 @@ var GlobalProxyPlugin = class extends import_obsidian.Plugin {
     
     for (let session of sessions) {
       try {
-        // Удаляем обработчик логина
+        // Remove the login handler
         const handler = this.loginHandlers.get(session);
         if (handler) {
           session.removeListener('login', handler);
           this.loginHandlers.delete(session);
         }
         
-        // Сбрасываем прокси
+        // Reset the proxy
         await session.setProxy({});
         
-        // Закрываем соединения для применения изменений
+        // Close connections to apply the change
         await session.closeAllConnections();
       } catch (e) {
         console.error('Failed to disable proxy for session', e);
@@ -276,7 +276,7 @@ var GlobalProxyPlugin = class extends import_obsidian.Plugin {
   }
   
   composeProxyRules() {
-    // Проверяем валидность всех прокси
+    // Validate all configured proxies
     const validProxies = ["socksProxy", "httpProxy", "httpsProxy"]
       .every(p => !this.settings[p] || isValidFormat(this.settings[p]));
     
@@ -285,14 +285,14 @@ var GlobalProxyPlugin = class extends import_obsidian.Plugin {
       return undefined;
     }
     
-    // Функция для удаления аутентификации из URL
+    // Strip credentials out of the URL
     const stripAuth = (url) => {
       if (!url) return "";
-      // Удаляем user:pass@ из URL
+      // Remove user:pass@ from the URL
       return url.replace(/^(\w+):\/\/[^@]+@/, '$1://');
     };
     
-    // Формируем правила прокси
+    // Build the proxy rules string
     let rules = [];
     
     if (isValidFormat(this.settings.socksProxy)) {
@@ -311,7 +311,7 @@ var GlobalProxyPlugin = class extends import_obsidian.Plugin {
       return undefined;
     }
     
-    // Добавляем direct:// в конец для обхода прокси по bypass rules
+    // Append direct:// so bypass-rule matches fall through directly
     return rules.join(";") + ",direct://";
   }
 };
@@ -406,11 +406,11 @@ function isValidFormat(proxyUrl) {
     return false;
   }
   
-  // Регулярное выражение для проверки формата прокси
-  // Поддерживает: scheme://[user:pass@]host:port
+  // Regex to validate proxy format
+  // Supports: scheme://[user:pass@]host:port
   const regex = /^(\w+):\/\/(?:([^:@]+):([^@]+)@)?([^:/]+):(\d+)$/;
   
-  // Альтернативный формат без схемы
+  // Alternative format without a scheme
   const simpleRegex = /^(?:([^:@]+):([^@]+)@)?([^:/]+):(\d+)$/;
   
   return regex.test(proxyUrl) || simpleRegex.test(proxyUrl);
