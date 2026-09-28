@@ -187,7 +187,14 @@ var GlobalProxyPlugin = class extends import_obsidian.Plugin {
       }
 
       event.preventDefault();
-      callback(proxyAuth.username, proxyAuth.password);
+      // PR #10's original code called back after a 100ms setTimeout ("for
+      // stability"). Restored here to test whether a same-tick callback
+      // races Electron's internal CONNECT-tunnel retry -- if this alone
+      // fixes ERR_TUNNEL_CONNECTION_FAILED, it's an Electron-side timing
+      // issue, not a credentials/wiring problem.
+      setTimeout(() => {
+        callback(proxyAuth.username, proxyAuth.password);
+      }, 100);
     };
 
     electronApp.on('login', this.appLoginHandler);
